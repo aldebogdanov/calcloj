@@ -43,6 +43,22 @@
   [meta addr]
   (keep (fn [[a m]] (when (contains? (:deps m) addr) a)) @meta))
 
+(defn- would-cycle?
+  "Would installing `addr` with `new-deps` create a cycle? True if `addr` is
+   reachable from new-deps following the forward dep graph (cell -> :deps).
+   Catches self-ref and indirect cycles. Must run BEFORE compile — a cyclic
+   formula deadlocks await into StackOverflowError."
+  [meta addr new-deps]
+  (let [deps-of (fn [c] (if (= c addr) new-deps (get-in @meta [c :deps])))]
+    (loop [stack (vec new-deps) seen #{}]
+      (if-let [c (peek stack)]
+        (let [stack (pop stack)]
+          (cond
+            (= c addr)  true
+            (seen c)    (recur stack seen)
+            :else       (recur (into stack (deps-of c)) (conj seen c))))
+        false))))
+
 (defn- write-cell!
   "Local update of one cell. Returns true if addr's PUBLIC spin object was
    created/replaced/removed (structural change -> dependents must rebuild)."
@@ -73,6 +89,8 @@
 
       :formula
       (let [{:keys [form deps]} (formula/parse (subs (str/trim raw) 1))
+            _  (when (would-cycle? meta addr deps)
+                 (throw (ex-info "circular reference" {:addr addr :deps deps})))
             sp (formula/compile form)]
         (when old-spin (spin-core/cleanup-spin! old-spin))
         (swap! registry assoc addr sp)

@@ -68,6 +68,24 @@
       (is (= 42 (v s "C1")))
       (is (= 43 (v s "C2"))))))
 
+(deftest cycles
+  (let [s (mk)]
+    (testing "self reference rejected, cell keeps prior value"
+      (put s "A1" "10")
+      (is (thrown? clojure.lang.ExceptionInfo (put s "A1" "=(+ #cell A1 1)")))
+      (is (= 10 (v s "A1")) "old value intact, no install"))
+    (testing "indirect cycle A1->B1->A1 rejected"
+      (put s "A1" "=(+ #cell B1 1)")
+      (put s "B1" "5")
+      (is (= 6 (v s "A1")))
+      (is (thrown? clojure.lang.ExceptionInfo (put s "B1" "=(+ #cell A1 1)")))
+      (is (= 5 (v s "B1")) "B1 stays literal"))
+    (testing "3-hop cycle rejected"
+      (let [s2 (mk)]
+        (put s2 "A1" "=(+ #cell B1 1)")
+        (put s2 "B1" "=(+ #cell C1 1)")
+        (is (thrown? clojure.lang.ExceptionInfo (put s2 "C1" "=(+ #cell A1 1)")))))))
+
 (deftest errors
   (let [s (mk)]
     (put s "A1" "10") (put s "A2" "hello")
