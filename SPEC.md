@@ -179,15 +179,19 @@ that the client `translate`s.
 
 ### Presence & edit locking
 
-- **Selection highlight** (`app.js`, client-only): the selected cell keeps a
-  `.sel` outline even when focus moves to the formula bar. `SELA` tracks the
-  selection; `selectCell` is driven by a delegated `focusin` on `#viewport` and
-  by `jump`. A `MutationObserver` on `#cells` re-applies `.sel` after every
-  re-render (scroll / edit / collaborator push).
+- **Selection highlight** (`app.js`, client-only), two tiers, both re-applied
+  after every `#cells` re-render via a `MutationObserver`:
+  - `.sel` — the selected cell ("you are here"); a calm outline that stays even
+    when focus moves to the formula bar. `SELA` tracks it; `selectCell` is driven
+    by a delegated `focusin` on `#viewport` and by `jump`.
+  - `.editing-local` — the cell being actively edited *right now* (its own input
+    focused, or the formula bar editing it); a stronger outline + fill. `EDITA`
+    tracks it via cell and `#fbar` focus listeners.
 - **Presence**: each session has a deterministic `:color` (hashed sid) plus
   `:cursor` (the cell it is on) and `:editing` (the cell it is actively typing
   in, else nil). `app.js` POSTs plain JSON to `/presence` on cell focus (cursor),
-  first keystroke (editing=true), and blur (editing=false). The server renders a
+  first keystroke (editing=true), blur (editing=false), **and** formula-bar
+  input/blur (so fbar edits lock the selected cell too). The server renders a
   per-session **`#peers` overlay** — markers positioned window-relative to *that*
   viewer's view — and pushes it to every session on the sheet (`broadcast-
   presence!`). The `#peers` layer translates with `#cells`. A non-editing marker

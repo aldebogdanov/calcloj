@@ -302,9 +302,15 @@
       [:style (h/raw (format (str "input.cell{position:absolute;width:%dpx;height:%dpx;"
                                   "box-sizing:border-box;border:1px solid #ddd;"
                                   "padding:2px 4px;font:13px monospace;}"
-                                  ;; persistent selection (independent of focus)
-                                  "input.cell.sel{outline:2px solid #1a73e8;"
+                                  ;; persistent selection ("you are here",
+                                  ;; independent of focus)
+                                  "input.cell.sel{outline:2px solid #7aa7f0;"
                                   "outline-offset:-2px;z-index:2;}"
+                                  ;; the cell being actively edited right now
+                                  ;; (its input focused, or the formula bar) —
+                                  ;; stronger than plain selection
+                                  "input.cell.editing-local{outline:2px solid #1a73e8;"
+                                  "outline-offset:-2px;background:#e8f0fe;z-index:2;}"
                                   ;; collaborator cursor overlays
                                   ".peer{position:absolute;box-sizing:border-box;"
                                   "border:2px solid #888;border-radius:2px;}"

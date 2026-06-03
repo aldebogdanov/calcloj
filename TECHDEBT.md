@@ -98,10 +98,6 @@ REMAINING:
   sweep (30 min) reaps the session. Mitigations to consider: a short per-edit
   lock TTL (auto-expire :editing after N seconds of no refresh, with the client
   re-asserting while focused), or clearing :editing on stream death.
-- **Formula-bar editing isn't a lock**: editing a cell through the wide formula
-  bar doesn't set :editing (only direct cell-input typing does), so it neither
-  locks nor shows "editing…" to peers. Acceptable for now; wire fbar focus/input
-  to presence if it matters.
 - **Presence chattiness**: every focus/blur/first-keystroke POSTs /presence and
   re-broadcasts the whole #peers overlay to all sessions. Fine at small scale;
   debounce / diff if sessions-per-sheet grows.

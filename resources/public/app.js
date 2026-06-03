@@ -112,15 +112,28 @@ function jump(addr) {
 window.jump = jump;
 
 // --- selection highlight (decoupled from input focus) ----------------------
-// The selected cell stays highlighted even when focus moves elsewhere (e.g. the
-// formula bar). Selection is client-only; we re-apply it after any re-render of
-// #cells (scroll, edit, collaborator push) via a MutationObserver.
-let SELA = null;
+// Two tiers, both client-only and re-applied after any #cells re-render (scroll,
+// edit, collaborator push) via a MutationObserver:
+//   .sel           -> the selected cell ("you are here"); stays highlighted even
+//                     when focus moves to the formula bar.
+//   .editing-local -> the cell being actively edited RIGHT NOW (its own input is
+//                     focused, or the formula bar editing it). Stronger style.
+let SELA = null;     // selected cell address
+let EDITA = null;    // cell being locally edited right now (or null)
 
 function paintSel() {
   document.querySelectorAll('input.cell.sel').forEach(function (e) { e.classList.remove('sel'); });
   if (SELA) { const e = $('c_' + SELA); if (e) e.classList.add('sel'); }
 }
+
+function paintEdit() {
+  document.querySelectorAll('input.cell.editing-local').forEach(function (e) { e.classList.remove('editing-local'); });
+  if (EDITA) { const e = $('c_' + EDITA); if (e) e.classList.add('editing-local'); }
+}
+
+function paintAll() { paintSel(); paintEdit(); }
+
+function setEditLocal(addr) { EDITA = addr; paintEdit(); }
 
 function selectCell(addr) {
   if (addr === SELA) return;
@@ -147,10 +160,11 @@ function sendPresence(cell, editing) {
 function initSelection() {
   const v = $('viewport'); if (!v || v.__selInit) return;
   v.__selInit = true;
-  // focusin a cell -> select it (cursor presence, not yet editing)
+  // focusin a cell -> select it + mark it as the cell edited right now
   v.addEventListener('focusin', function (e) {
     if (e.target.classList && e.target.classList.contains('cell')) {
-      selectCell(e.target.id.slice(2)); _lastEditing = null;
+      const a = e.target.id.slice(2);
+      selectCell(a); setEditLocal(a); _lastEditing = null;
     }
   });
   // first keystroke in a cell -> mark editing (locks it for peers)
@@ -163,12 +177,19 @@ function initSelection() {
   // leaving the cell -> stop editing (cursor stays where it is)
   v.addEventListener('focusout', function (e) {
     if (e.target.classList && e.target.classList.contains('cell')) {
-      _lastEditing = null; sendPresence(e.target.id.slice(2), false);
+      _lastEditing = null; setEditLocal(null); sendPresence(e.target.id.slice(2), false);
     }
   });
-  // re-apply the selection class whenever #cells is re-rendered
+  // formula bar edits the SELECTED cell -> mirror the same editing tier + lock
+  const fbar = $('fbar');
+  if (fbar) {
+    fbar.addEventListener('focusin', function () { setEditLocal(SELA); });
+    fbar.addEventListener('input',   function () { if (SELA && _lastEditing !== SELA) { _lastEditing = SELA; sendPresence(SELA, true); } });
+    fbar.addEventListener('focusout', function () { const a = SELA; setEditLocal(null); _lastEditing = null; if (a) sendPresence(a, false); });
+  }
+  // re-apply both highlight tiers whenever #cells is re-rendered
   const cells = $('cells');
-  if (cells) new MutationObserver(paintSel).observe(cells, {childList: true, subtree: true});
+  if (cells) new MutationObserver(paintAll).observe(cells, {childList: true, subtree: true});
 }
 
 function initScroll() {
