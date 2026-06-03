@@ -61,8 +61,28 @@
         (let [s (or (store/load-sheet id) (sheet/create-sheet))]
           (swap! sheets* assoc id s)
           s))))
-(defonce ^:private view* (atom {:r0 0 :c0 0}))
-(defonce ^:private dims* (atom nil))   ; last [w h] sent, to avoid resizing spacer needlessly
+
+;; Sessions: one per live SSE stream. Hold the sheet id + per-session viewport
+;; (view/dims) so concurrent clients on the same sheet keep independent scroll.
+(defonce ^:private sessions* (atom {}))  ; sid -> {:sheet id :view {:r0 :c0} :dims [w h]}
+
+(defn- session-view [sid] (get-in @sessions* [sid :view] {:r0 0 :c0 0}))
+(defn- set-session-view! [sid v] (when (@sessions* sid) (swap! sessions* assoc-in [sid :view] v)))
+(defn- session-dims [sid] (get-in @sessions* [sid :dims]))
+(defn- set-session-dims! [sid d] (when (@sessions* sid) (swap! sessions* assoc-in [sid :dims] d)))
+(defn- sheet-of [sid] (get-in @sessions* [sid :sheet]))
+
+(defn- sessions-on [sheet-id]
+  (count (filter #(= sheet-id (:sheet %)) (vals @sessions*))))
+
+(defn- unload-sheet!
+  "Save then release a sheet whose last session just left."
+  [sheet-id]
+  (when (and (zero? (sessions-on sheet-id)) (@sheets* sheet-id))
+    (let [sh (@sheets* sheet-id)]
+      (store/save! sheet-id sh)
+      (sheet/close! sh)
+      (swap! sheets* dissoc sheet-id))))
 
 (defn- used-max
   "[max-ci max-ri] over non-empty cells (-1 if none)."
@@ -80,9 +100,8 @@
         rows (min MAX-ROWS (+ (max MIN-ROWS (inc rm) (+ (long r0) WIN-ROWS)) BUF-ROWS))]
     [(+ GUT (* cols CW)) (* rows RH)]))
 
-(defn- in-window? [addr]
-  (let [{:keys [ci ri]} (addr/parse addr)
-        {:keys [r0 c0]} @view*]
+(defn- in-window? [{:keys [r0 c0]} addr]
+  (let [{:keys [ci ri]} (addr/parse addr)]
     (and (<= (- (long c0) OVER) ci (+ (long c0) WIN-COLS))
          (<= (- (long r0) OVER) ri (+ (long r0) WIN-ROWS)))))
 
@@ -130,11 +149,9 @@
    the visible window. Spacer grows with used range / view, not a fixed huge
    sheet. Delegation handlers live on #scroll (parent), so re-rendering this
    does not drop them."
-  [sh]
-  (let [{:keys [r0 c0]} @view*
-        [cis ris] (window r0 c0)
+  [sh {:keys [r0 c0]}]
+  (let [[cis ris] (window r0 c0)
         [w h] (spacer-dims sh r0 c0)]
-    (reset! dims* [w h])
     (h/html
      [:div {:id "colstrip"
             :style (format (str "position:sticky;top:0;z-index:2;height:%dpx;width:%dpx;"
@@ -165,8 +182,11 @@
                              (- CW 1) (- RH 1)))]
       [:script {:type "module" :src "/datastar.js"}]
       [:script {:src "/app.js"}]]
-     [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', bar:'', r0:0, c0:0, sheet:'%s'}" id)
+     [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', bar:'', r0:0, c0:0, sheet:'%s', sid:''}" id)
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
+      ;; hidden input carrying the session id into $sid; /app.js generates the
+      ;; id, fills this, and opens the lifecycle EventSource.
+      [:input {:id "sidbox" :data-bind:sid "" :style "display:none;"}]
       [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
              :data-on:click "$err=''"
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
@@ -204,7 +224,7 @@
              (str "evt.target.classList.contains('cell') && "
                   "($cell=evt.target.id.slice(2), $v=evt.target.value, $bar=$v, @post('/cell'))")
              :style "height:78vh;overflow:auto;border:1px solid #ccc;position:relative;"}
-       (grid-layers sh)]]])))
+       (grid-layers sh {:r0 0 :c0 0})]]])))
 
 ;; --- SSE (official Datastar SDK) ----------------------------------------
 
@@ -239,10 +259,14 @@
       (re-find #"circular" m)          "circular reference"
       :else m)))
 
+(defn- sheet-id-of [{:keys [sheet]}]
+  (if (store/valid-id? sheet) sheet "default"))
+
 (defn- handle-cell [req]
-  (let [{:keys [cell v sheet]} (read-signals req)
-        sid (if (store/valid-id? sheet) sheet "default")
-        sh  (sheet-for sid)]
+  (let [{:keys [cell v sid] :as sig} (read-signals req)
+        sheet-id (sheet-id-of sig)
+        sh   (sheet-for sheet-id)
+        view (session-view sid)]
     (sse req
       (fn [gen]
         (when (addr/valid? cell)
@@ -250,9 +274,9 @@
             (try
               (sheet/set-cell! sh cell (str v))
               (sheet/settle! sh)
-              (store/save! sid sh)                    ; autosave (source document)
+              (store/save! sheet-id sh)               ; autosave (source document)
               (let [affected (cons cell (sort (sheet/dependents* sh cell)))
-                    visible  (filter in-window? affected)   ; only patch on-screen
+                    visible  (filter #(in-window? view %) affected)   ; on-screen for THIS session
                     errs (keep (fn [a]
                                  (when-let [e (:error (sheet/value sh a))]
                                    (str a ": " (pretty-err e))))
@@ -268,32 +292,58 @@
                 (signals! gen {:err (str cell ": " (pretty-err (.getMessage e)))})))))))))
 
 (defn- handle-view [req]
-  (let [{:keys [r0 c0 sheet]} (read-signals req)
-        sh (sheet-for (if (store/valid-id? sheet) sheet "default"))
-        r0 (max 0 (long (or r0 0)))
-        c0 (max 0 (long (or c0 0)))]
-    (reset! view* {:r0 r0 :c0 c0})
+  (let [{:keys [r0 c0 sid] :as sig} (read-signals req)
+        sh   (sheet-for (sheet-id-of sig))
+        view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))}]
+    (set-session-view! sid view)
     (sse req
       (fn [gen]
-        (if (= @dims* (spacer-dims sh r0 c0))
-          ;; bounds unchanged: cheap inner patch of window + headers
-          (let [[cis ris] (window r0 c0)]
-            (patch-inner! gen "#cells"   (cells-html sh cis ris))
-            (patch-inner! gen "#colhead" (colhead-html cis))
-            (patch-inner! gen "#rowhead" (rowhead-html ris)))
-          ;; bounds grew (reached edge / jumped): re-render grid (resizes spacer).
-          ;; #scroll element + its delegated handlers persist.
-          (patch-inner! gen "#scroll" (str (grid-layers sh))))))))
+        (let [new-dims (spacer-dims sh (:r0 view) (:c0 view))]
+          (if (= (session-dims sid) new-dims)
+            ;; bounds unchanged: cheap inner patch of window + headers
+            (let [[cis ris] (window (:r0 view) (:c0 view))]
+              (patch-inner! gen "#cells"   (cells-html sh cis ris))
+              (patch-inner! gen "#colhead" (colhead-html cis))
+              (patch-inner! gen "#rowhead" (rowhead-html ris)))
+            ;; bounds grew (reached edge / jumped): re-render grid (resizes spacer).
+            (do (set-session-dims! sid new-dims)
+                (patch-inner! gen "#scroll" (str (grid-layers sh view))))))))))
+
+;; Session lifecycle via plain HTTP (no persistent SSE — http-kit won't fire a
+;; channel close on idle disconnect anyway). The client registers on load and,
+;; on page unload, fires navigator.sendBeacon to /session/end (reliable during
+;; unload). A valid session id is a uuid-ish token.
+(def ^:private sid-re #"[A-Za-z0-9-]{1,64}")
+
+(defn- body-json [req]
+  (when-let [b (:body req)]
+    (json/read-value (slurp b) json/keyword-keys-object-mapper)))
+
+(defn- handle-session-start [req]
+  (let [{:keys [sid sheet]} (body-json req)
+        sheet-id (if (store/valid-id? sheet) sheet "default")]
+    (when (and sid (re-matches sid-re (str sid)))
+      (swap! sessions* assoc sid
+             {:sheet sheet-id :view {:r0 0 :c0 0}
+              :dims (spacer-dims (sheet-for sheet-id) 0 0)}))
+    {:status 204}))
+
+(defn- handle-session-end [req]
+  (let [{:keys [sid]} (body-json req)]
+    (when (and sid (@sessions* sid))
+      (let [sid-sheet (sheet-of sid)]
+        (swap! sessions* dissoc sid)
+        (unload-sheet! sid-sheet)))
+    {:status 204}))
 
 (defn- app [req]
   (case [(:request-method req) (:uri req)]
-    [:get "/"]            (let [sid (or (some->> (:query-string req)
-                                                 (re-find #"(?:^|&)s=([A-Za-z0-9_-]{1,64})")
-                                                 second)
-                                        "default")]
-                            (reset! view* {:r0 0 :c0 0})   ; browser scroll starts at 0
+    [:get "/"]            (let [sheet-id (or (some->> (:query-string req)
+                                                      (re-find #"(?:^|&)s=([A-Za-z0-9_-]{1,64})")
+                                                      second)
+                                             "default")]
                             {:status 200 :headers {"Content-Type" "text/html"}
-                             :body (page (sheet-for sid) sid)})
+                             :body (page (sheet-for sheet-id) sheet-id)})
     [:get "/datastar.js"] (if-let [r (io/resource "public/datastar.js")]
                             {:status 200 :headers {"Content-Type" "text/javascript"}
                              :body (slurp r)}
@@ -302,6 +352,12 @@
                             {:status 200 :headers {"Content-Type" "text/javascript"}
                              :body (slurp r)}
                             {:status 404 :body "no app.js"})
+    [:post "/session/start"] (handle-session-start req)
+    [:post "/session/end"]   (handle-session-end req)
+    [:get "/debug"]       {:status 200 :headers {"Content-Type" "application/json"}
+                           :body (json/write-value-as-string
+                                  {:sessions (count @sessions*)
+                                   :loaded-sheets (vec (keys @sheets*))})}
     [:post "/cell"]       (handle-cell req)
     [:post "/view"]       (handle-view req)
     {:status 404 :body "not found"}))

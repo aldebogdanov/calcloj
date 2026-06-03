@@ -29,3 +29,32 @@ function jump(addr) {
 }
 
 window.jump = jump;
+
+// Session lifecycle. Generate a session id, push it into $sid (via the hidden
+// bound input so Datastar posts carry it), register on load, and release on
+// page unload with navigator.sendBeacon — reliable even as the tab closes.
+function initSession() {
+  if (window.__sid) return;
+  const sid = (crypto.randomUUID ? crypto.randomUUID()
+                                 : 'sid-' + Math.random().toString(36).slice(2));
+  window.__sid = sid;
+  const box = document.getElementById('sidbox');
+  if (box) { box.value = sid; box.dispatchEvent(new Event('input', {bubbles: true})); }
+  const sheet = new URLSearchParams(location.search).get('s') || 'default';
+
+  fetch('/session/start', {
+    method: 'POST', keepalive: true,
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify({sid: sid, sheet: sheet})
+  }).catch(function () {});
+
+  window.addEventListener('pagehide', function () {
+    try {
+      navigator.sendBeacon('/session/end',
+        new Blob([JSON.stringify({sid: sid})], {type: 'application/json'}));
+    } catch (e) {}
+  });
+}
+// fire after Datastar is ready so the $sid signal binding is live
+document.addEventListener('datastar-ready', initSession);
+

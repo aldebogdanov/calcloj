@@ -130,6 +130,12 @@
 (defn settle! [{:keys [rt]}]
   (simple/await-drain-complete! rt :timeout-ms 5000))
 
+(defn close!
+  "Release the execution context (executor + drain). Call when unloading a
+   sheet that no session references."
+  [{:keys [rt]}]
+  (ctx/close-context! rt))
+
 (defn value
   "Current computed value of `addr`, or nil if blank. Errors -> {:error msg}."
   [{:keys [rt registry]} addr]

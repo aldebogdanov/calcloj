@@ -29,16 +29,22 @@ This removes the row cap entirely and makes the cap purely a coordinate clamp.
 - No config system yet — grid bounds, geometry are `def` constants. Fold into
   per-sheet settings once persistence lands.
 
-## Sessions — sheet lifecycle + per-session position
+## Sessions — crash/sleep cleanup backstop
 
-`sheets*` loads sheets on demand but never unloads them; an execution context
-lives forever once touched. Also viewport `view*`/`dims*` are global (one active
-view), so two sessions on the same sheet fight over scroll position.
+DONE: sessions now register on load (`/session/start`) and release on unload via
+`navigator.sendBeacon('/session/end')`; sheets are ref-counted and unloaded
+(execution context closed, saved) when the last session leaves; viewport is
+per-session.
 
-Once user sessions exist:
-- ref-count sheets by active session; **unload** (close the execution context,
-  drop from `sheets*`) when no session references a sheet. Save before unload.
-- store **viewport position per session key**, not globally.
-- hook **session start / close** to acquire/release sheet refs. Datastar's
-  official SDK exposes connection lifecycle (SSE open/close) we can use to drive
-  this — release on disconnect.
+REMAINING: `sendBeacon` only fires on *graceful* unload (tab close, navigate).
+A browser crash, killed process, or laptop sleep leaves an orphan session that
+pins its sheet forever. Add a backstop:
+- stamp each session with last-activity time (touch on /cell, /view);
+- a periodic sweep ends sessions idle past a TTL (and unloads their sheets).
+
+NOTE: we dropped the persistent-SSE approach — http-kit does not fire an
+async-channel close on idle client disconnect without a write, so SSE-based
+lifecycle needed heartbeats. Beacon is simpler and reliable for the common case.
+
+The `/debug` endpoint (session/sheet counts) is dev-only — gate or remove before
+any real deployment.
